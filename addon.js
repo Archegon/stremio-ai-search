@@ -2945,6 +2945,24 @@ const catalogHandler = async function (args, req) {
     let traktData = null;
     let filteredTraktData = null;
 
+    if (DEFAULT_TRAKT_CLIENT_ID && configData.TraktAccessToken) {
+      logger.info("Fetching Trakt data for query", {
+        hasTraktClientId: !!DEFAULT_TRAKT_CLIENT_ID,
+        traktClientIdLength: DEFAULT_TRAKT_CLIENT_ID?.length,
+        hasTraktAccessToken: !!configData.TraktAccessToken,
+        traktAccessTokenLength: configData.TraktAccessToken?.length,
+        isRecommendation: isRecommendation,
+        query: searchQuery,
+      });
+
+      traktData = await fetchTraktWatchedAndRated(
+        DEFAULT_TRAKT_CLIENT_ID,
+        configData.TraktAccessToken,
+        type === "movie" ? "movies" : "shows",
+        configData
+      );
+    }
+
     // For recommendation queries, use the new workflow with genre discovery
     if (isRecommendation) {
 
@@ -2973,78 +2991,59 @@ const catalogHandler = async function (args, req) {
         originalType: type,
       });
 
-      // If Trakt is configured, get user data ONLY for recommendation queries
-      if (DEFAULT_TRAKT_CLIENT_ID && configData.TraktAccessToken) {
-        logger.info("Fetching Trakt data for recommendation query", {
-          hasTraktClientId: !!DEFAULT_TRAKT_CLIENT_ID,
-          traktClientIdLength: DEFAULT_TRAKT_CLIENT_ID?.length,
-          hasTraktAccessToken: !!configData.TraktAccessToken,
-          traktAccessTokenLength: configData.TraktAccessToken?.length,
-          isRecommendation: isRecommendation,
-          query: searchQuery,
-        });
+      // Filter Trakt data based on discovered genres if we have any
+      if (traktData) {
+        if (discoveredGenres.length > 0) {
+          filteredTraktData = filterTraktDataByGenres(
+            traktData,
+            discoveredGenres
+          );
 
-        traktData = await fetchTraktWatchedAndRated(
-          DEFAULT_TRAKT_CLIENT_ID,
-          configData.TraktAccessToken,
-          type === "movie" ? "movies" : "shows",
-          configData
-        );
+          logger.info("Filtered Trakt data by genres", {
+            genres: discoveredGenres,
+            recentlyWatchedCount: filteredTraktData.recentlyWatched.length,
+            highlyRatedCount: filteredTraktData.highlyRated.length,
+            lowRatedCount: filteredTraktData.lowRated.length,
+          });
 
-        // Filter Trakt data based on discovered genres if we have any
-        if (traktData) {
-          if (discoveredGenres.length > 0) {
-            filteredTraktData = filterTraktDataByGenres(
-              traktData,
-              discoveredGenres
-            );
+            // Log if filtering by genres eliminated all Trakt data
+          if (
+            filteredTraktData.recentlyWatched.length === 0 &&
+            filteredTraktData.highlyRated.length === 0 &&
+            filteredTraktData.lowRated.length === 0
+          ) {
+            if (ENABLE_LOGGING) {
+              logger.emptyCatalog("No Trakt data matches discovered genres", {
+                type,
+                searchQuery,
+                discoveredGenres,
+                totalWatched: traktData.watched.length,
+                totalRated: traktData.rated.length,
+              });
+            }
+          }
+        } else {
+          // When no genres are discovered, use all Trakt data
+          filteredTraktData = {
+            recentlyWatched: traktData.watched?.slice(0, 100) || [],
+            highlyRated: (traktData.rated || [])
+              .filter((item) => item.rating >= 4)
+              .slice(0, 25),
+            lowRated: (traktData.rated || [])
+              .filter((item) => item.rating <= 2)
+              .slice(0, 25),
+          };
 
-            logger.info("Filtered Trakt data by genres", {
-              genres: discoveredGenres,
+          logger.info(
+            "Using all Trakt data (no specific genres discovered)",
+            {
+              totalWatched: traktData.watched?.length || 0,
+              totalRated: traktData.rated?.length || 0,
               recentlyWatchedCount: filteredTraktData.recentlyWatched.length,
               highlyRatedCount: filteredTraktData.highlyRated.length,
               lowRatedCount: filteredTraktData.lowRated.length,
-            });
-
-            // Log if filtering by genres eliminated all Trakt data
-            if (
-              filteredTraktData.recentlyWatched.length === 0 &&
-              filteredTraktData.highlyRated.length === 0 &&
-              filteredTraktData.lowRated.length === 0
-            ) {
-              if (ENABLE_LOGGING) {
-                logger.emptyCatalog("No Trakt data matches discovered genres", {
-                  type,
-                  searchQuery,
-                  discoveredGenres,
-                  totalWatched: traktData.watched.length,
-                  totalRated: traktData.rated.length,
-                });
-              }
             }
-          } else {
-            // When no genres are discovered, use all Trakt data
-            filteredTraktData = {
-              recentlyWatched: traktData.watched?.slice(0, 100) || [],
-              highlyRated: (traktData.rated || [])
-                .filter((item) => item.rating >= 4)
-                .slice(0, 25),
-              lowRated: (traktData.rated || [])
-                .filter((item) => item.rating <= 2)
-                .slice(0, 25),
-            };
-
-            logger.info(
-              "Using all Trakt data (no specific genres discovered)",
-              {
-                totalWatched: traktData.watched?.length || 0,
-                totalRated: traktData.rated?.length || 0,
-                recentlyWatchedCount: filteredTraktData.recentlyWatched.length,
-                highlyRatedCount: filteredTraktData.highlyRated.length,
-                lowRatedCount: filteredTraktData.lowRated.length,
-              }
-            );
-          }
+          );
         }
       }
     }
@@ -3648,9 +3647,24 @@ const catalogHandler = async function (args, req) {
         fromCache: false,
       };
 
-      // Filter out watched items if we have Trakt data and this is a recommendation query
-      if (traktData && isRecommendation) {
+      // Filter out watched items if we have Trakt data
+      if (traktData) {
         const watchHistory = traktData.watched.concat(traktData.history || []);
+
+        if (exactMatchMeta) {
+          const exactMatchItem = {
+            name: exactMatchMeta.name,
+            year: exactMatchMeta.year,
+          };
+
+          if (isItemWatchedOrRated(exactMatchItem, watchHistory, traktData.rated)) {
+            logger.info("Exact match filtered out due to Trakt watch history", {
+              searchQuery,
+              exactMatchTitle: exactMatchMeta.name,
+            });
+            exactMatchMeta = null;
+          }
+        }
 
         // Log a summary of the user's watched and rated items for validation
         const watchedSummary = watchHistory.slice(0, 20).map((item) => {

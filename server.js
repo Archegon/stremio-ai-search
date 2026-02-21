@@ -848,7 +848,10 @@ async function startServer() {
           );
 
           if (!tokenResponse.ok) {
-            throw new Error("Failed to exchange code for token");
+            const errText = await tokenResponse.text(); // Trakt often returns useful JSON here
+            throw new Error(
+              `Token exchange failed: ${tokenResponse.status} ${tokenResponse.statusText} - ${errText}`
+            );
           }
 
           const tokenData = await tokenResponse.json();

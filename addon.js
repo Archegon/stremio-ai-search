@@ -1389,6 +1389,9 @@ function determineIntentFromKeywords(query) {
 }
 
 function extractGenreCriteria(query) {
+  // Genre detection disabled
+  return null;
+  
   const q = query.toLowerCase();
 
   const basicGenres = {
